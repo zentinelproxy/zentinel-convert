@@ -1,92 +1,133 @@
-# zentinel-convert
+<p align="center">
+  <a href="https://zentinelproxy.io">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
+      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+    </picture>
+  </a>
+</p>
 
-Convert reverse proxy configurations to [Zentinel](https://github.com/zentinelproxy/zentinel) KDL format.
+<h3 align="center">Config converter</h3>
 
-Supports **nginx**, **HAProxy**, **Traefik**, **Caddy**, and **Envoy**. Auto-detects the source format, translates to Zentinel's intermediate representation, and emits idiomatic KDL — including agent suggestions where your existing config maps to Zentinel agents (WAF, auth, rate limiting).
+<p align="center">Converts nginx, HAProxy, Traefik, Caddy and Envoy configurations into Zentinel KDL, for anyone moving an existing proxy setup to Zentinel.</p>
 
-Also available as a **WebAssembly module** for in-browser conversion.
+<p align="center">
+  <a href="https://zentinelproxy.io/converter/">Converter in the browser</a> &middot;
+  <a href="https://docs.zentinelproxy.io">Docs</a> &middot;
+  <a href="https://github.com/zentinelproxy">All repositories</a>
+</p>
+
+`zentinel-convert` detects the source format, parses it into an intermediate
+representation (listeners, routes, upstreams), and writes Zentinel KDL. It also
+reports where the source config does something a Zentinel agent would do (rate
+limiting, auth, WAF-like rules) and can declare that agent for you. The same
+code, compiled to WebAssembly, runs the [converter on
+zentinelproxy.io](https://zentinelproxy.io/converter/).
+
+The output is a starting point, not a finished config: check it with
+`zentinel test -c <file>` and read it before you deploy it (see
+[Limitations](#limitations)).
+
+## Quick start
+
+```sh
+cargo install --git https://github.com/zentinelproxy/zentinel-convert
+zentinel-convert convert nginx.conf -o zentinel.kdl
+zentinel test -c zentinel.kdl
+```
+
+Or paste a config into [zentinelproxy.io/converter](https://zentinelproxy.io/converter/);
+nothing leaves the browser.
 
 ## Install
 
+The crate is not on crates.io. Install from Git:
+
 ```sh
-cargo install zentinel-convert
+cargo install --git https://github.com/zentinelproxy/zentinel-convert
 ```
 
-Or build from source:
+or build from source:
 
 ```sh
 git clone https://github.com/zentinelproxy/zentinel-convert
 cd zentinel-convert
-cargo build --release
+cargo build --release   # binary at target/release/zentinel-convert
 ```
 
 ## Usage
 
-### Convert
+### convert
 
 ```sh
-# Auto-detect format, print KDL to stdout
-zentinel-convert convert nginx.conf
-
-# Specify format explicitly
-zentinel-convert convert --format haproxy haproxy.cfg
-
-# Write to file
-zentinel-convert convert nginx.conf -o zentinel.kdl
-
-# Follow nginx include directives
-zentinel-convert convert --follow-includes nginx.conf
-
-# Auto-create agents for high-confidence detections
-zentinel-convert convert --agents auto nginx.conf
-
-# Dry run — show output without writing
-zentinel-convert convert --dry-run nginx.conf
+zentinel-convert convert nginx.conf                       # auto-detect, KDL to stdout
+zentinel-convert convert --format haproxy haproxy.cfg     # name the format
+zentinel-convert convert nginx.conf -o zentinel.kdl       # write to a file
+zentinel-convert convert --follow-includes nginx.conf     # follow nginx include
+zentinel-convert convert --agents auto nginx.conf         # declare detected agents
+zentinel-convert convert --dry-run nginx.conf             # show, don't write
 ```
 
-### Analyze
+| Option | Default | Meaning |
+|---|---|---|
+| `-f`, `--format` | auto-detect | `nginx`, `haproxy`, `traefik`, `caddy`, `envoy` |
+| `-o`, `--output` | stdout | output file |
+| `--follow-includes` | off | follow `include` directives |
+| `--max-include-depth` | `10` | include nesting limit |
+| `--strict` | off | fail on unknown directives |
+| `--agents` | `suggest` | `suggest` (report only), `auto` (declare high-confidence agents), `none` |
+| `--agent-socket-dir` | `/run/zentinel` | directory used for declared agents' sockets |
+| `--comments` | off | add explanatory comments |
+| `--source-refs` | off | add source file references |
+| `--dry-run` | off | print instead of writing |
 
-Scan a config for patterns that map to Zentinel agents without performing a full conversion:
+`--format apache` is accepted by the CLI but there is no Apache parser yet; it
+fails with "Failed to detect configuration format".
+
+### analyze
+
+Report agent opportunities without converting:
 
 ```sh
 zentinel-convert analyze nginx.conf
-
-# JSON output for scripting
 zentinel-convert analyze --json haproxy.cfg
 ```
 
-### Detect
-
-Identify the format of a configuration file:
+### detect
 
 ```sh
 zentinel-convert detect mystery-config.txt
-# => nginx
+# nginx
 ```
 
 ## Example
 
-Given this nginx config:
+nginx directives are read inside an `http { }` block, as nginx itself requires;
+a file with bare `upstream`/`server` blocks at top level converts to an empty
+config.
 
 ```nginx
-upstream backend {
-    least_conn;
-    server 10.0.0.1:8080 weight=5;
-    server 10.0.0.2:8080 weight=3;
-    server 10.0.0.3:8080 backup;
-    keepalive 32;
-}
+http {
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
 
-server {
-    listen 443 ssl http2;
-    server_name api.example.com;
+    upstream backend {
+        least_conn;
+        server 10.0.0.1:8080 weight=5;
+        server 10.0.0.2:8080 weight=3;
+        server 10.0.0.3:8080 backup;
+        keepalive 32;
+    }
 
-    ssl_certificate     /etc/ssl/certs/api.crt;
-    ssl_certificate_key /etc/ssl/private/api.key;
+    server {
+        listen 443 ssl http2;
+        server_name api.example.com;
+        ssl_certificate     /etc/ssl/certs/api.crt;
+        ssl_certificate_key /etc/ssl/private/api.key;
 
-    location /api/v1/ {
-        limit_req zone=api_limit burst=20;
-        proxy_pass http://backend;
+        location /api/v1/ {
+            limit_req zone=api_limit burst=20;
+            proxy_pass http://backend;
+        }
     }
 }
 ```
@@ -97,8 +138,6 @@ server {
 schema-version "1.0"
 
 system {
-    worker-threads 4
-    max-connections 1024
 }
 
 listeners {
@@ -119,7 +158,6 @@ routes {
             host "api.example.com"
         }
         upstream "backend"
-        timeout-ms 60000
     }
 }
 
@@ -136,84 +174,97 @@ upstreams {
 }
 ```
 
-The converter also detects that `limit_req` maps to Zentinel's [ratelimit agent](https://github.com/zentinelproxy/zentinel-agent-ratelimit) and will suggest (or auto-create with `--agents auto`) the appropriate agent configuration.
+and reports two high-confidence rate-limit opportunities (`limit_req_zone`, and
+`limit_req` on `route_api_v1`). Note `backup=#true`: Zentinel does not read a
+`backup` property on targets, so `10.0.0.3` becomes an ordinary target that
+receives traffic.
 
-## Agent Detection
+## Agent detection
 
-The converter recognizes patterns in source configs that correspond to Zentinel agents:
-
-| Source pattern | Detected agent |
+| Source pattern | Agent |
 |---|---|
-| `limit_req`, rate limiting rules | [`ratelimit`](https://github.com/zentinelproxy/zentinel-agent-ratelimit) |
-| `auth_basic`, JWT/OIDC directives | [`auth`](https://github.com/zentinelproxy/zentinel-agent-auth) |
-| ModSecurity, WAF rules, `deny` blocks | [`waf`](https://github.com/zentinelproxy/zentinel-agent-waf) |
+| `limit_req`, `limit_req_zone` and equivalent rate limits | [Rate limit](https://registry.zentinelproxy.io/ratelimit/) |
+| `auth_basic`, `Authorization` header checks (Basic, Bearer) | [Auth](https://registry.zentinelproxy.io/auth/) |
+| IP allow/deny lists, scanner User-Agent blocks (sqlmap, nikto, ...), Referer/Origin and Content-Type checks | [WAF](https://registry.zentinelproxy.io/waf/) |
 
-Three modes control this behavior:
+With `--agents auto` the converter writes an `agents { }` block for each
+high-confidence detection, but does not attach the agent to any route; add the
+route's `agents` reference yourself, or the agent is never called.
 
-- **`--agents suggest`** (default) — report agent opportunities in diagnostics
-- **`--agents auto`** — auto-create agents for high-confidence detections, suggest the rest
-- **`--agents none`** — skip agent detection entirely
+## Supported formats
 
-## Supported Formats
-
-| Format | Extensions | Status |
+| Format | Files | What is read |
 |---|---|---|
-| nginx | `.conf` | Full support — includes, upstreams, locations, SSL, rate limiting |
-| HAProxy | `.cfg` | Frontends, backends, ACLs, stick-tables |
-| Traefik | `.yaml`, `.toml` | Routers, services, middlewares (v2/v3) |
-| Caddy | `Caddyfile` | Sites, reverse_proxy, TLS, matchers |
-| Envoy | `.yaml` | Listeners, clusters, routes, filters |
+| nginx | `.conf` | `http` block: includes, upstreams, servers, locations, TLS, rate limiting |
+| HAProxy | `.cfg` | frontends, backends, ACLs, stick tables |
+| Traefik | `.yaml`, `.toml` | routers, services, middlewares (v2/v3) |
+| Caddy | `Caddyfile` | sites, `reverse_proxy`, TLS, matchers |
+| Envoy | `.yaml` | listeners, clusters, routes, filters |
+
+## Limitations
+
+Converting each fixture in `tests/fixtures/` and running `zentinel test -c` on
+the result shows the gaps a converted config can have:
+
+- TLS listeners can come out with a `tls { }` block that has no certificate,
+  which Zentinel rejects: Caddy and Traefik sites that rely on automatic
+  certificates, and HAProxy `bind ... ssl crt <file.pem>` (the combined PEM is
+  not carried over). Add `cert-file`/`key-file` or an `acme` block.
+- Envoy listeners can come out with `protocol "h2c"`, which Zentinel does not
+  accept (`http`, `https`, `h2`, `h3`).
+- nginx `root` locations become static-file routes that require the directory
+  to exist on the machine that runs `zentinel test`.
 
 ## WebAssembly
 
-A WASM build is available for in-browser conversion (powers the playground on [zentinelproxy.io](https://zentinelproxy.io)):
+The `crates/wasm` crate (`zentinel-convert-wasm`) is what the site's converter
+loads:
 
 ```sh
 cd crates/wasm
 wasm-pack build --target web --release
 ```
 
-The WASM module exports:
+It exports `convert(config, format?)`, `detect_format(config)`,
+`validate(config, format?)`, `get_supported_formats()` and `get_version()`.
 
-- `convert(config, format?)` — convert a config string to KDL
-- `detect_format(config)` — detect the source format
-- `validate(config, format?)` — validate without full conversion
-- `get_supported_formats()` — list supported formats
-
-## Library Usage
-
-`zentinel-convert` is also a Rust library:
+## Library
 
 ```rust
-use zentinel_convert::{convert, ConvertOptions, AgentMode};
+use zentinel_convert::{convert, AgentMode, ConvertOptions};
 use std::path::Path;
 
 let result = convert(
     Path::new("nginx.conf"),
-    ConvertOptions {
-        agent_mode: AgentMode::Auto,
-        ..Default::default()
-    },
+    ConvertOptions { agent_mode: AgentMode::Auto, ..Default::default() },
 )?;
-
 println!("{}", result.kdl_output);
-
-for suggestion in &result.diagnostics.agent_suggestions {
-    println!("  {:?} agent ({:?} confidence)", suggestion.agent_type, suggestion.confidence);
+for s in &result.diagnostics.agent_suggestions {
+    println!("{:?} agent ({:?} confidence)", s.agent_type, s.confidence);
 }
 ```
 
-## Testing
-
-Tests use [insta](https://insta.rs) for snapshot testing:
+## Development
 
 ```sh
-cargo test
-
-# Review snapshot changes after modifying parser/emitter output
-cargo insta review
+cargo build
+cargo test          # unit tests plus insta snapshot tests in tests/golden_tests.rs
+cargo insta review  # after changing parser or emitter output
 ```
+
+## Related
+
+- [Converter on zentinelproxy.io](https://zentinelproxy.io/converter/)
+- [Configuration reference](https://docs.zentinelproxy.io/)
+- [Zentinel](https://github.com/zentinelproxy/zentinel)
 
 ## License
 
-MIT OR Apache-2.0
+`Cargo.toml` declares `MIT OR Apache-2.0`; the repository does not yet contain
+a `LICENSE` file.
+
+---
+
+<p align="center">
+  <sub>Part of <a href="https://zentinelproxy.io">Zentinel</a>, the security-first reverse proxy. The shisa guards the gate.</sub>
+</p>
