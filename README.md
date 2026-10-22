@@ -260,8 +260,7 @@ cargo insta review  # after changing parser or emitter output
 
 ## License
 
-`Cargo.toml` declares `MIT OR Apache-2.0`; the repository does not yet contain
-a `LICENSE` file.
+MIT OR Apache-2.0, see [`LICENSE-MIT`](LICENSE-MIT) or [`LICENSE-APACHE`](LICENSE-APACHE), at your option.
 
 ---
 
